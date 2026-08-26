@@ -1,0 +1,88 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kamba}
+      POSTGRES_USER: ${POSTGRES_USER:-kamba}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kamba}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kamba}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Processes the ingestion/delivery job queue. Scale with
+  # `docker compose up --scale worker=3` if you need to load-test
+  # concurrent job processing later in the week.
+  worker:
+    build: .
+    command: python manage.py rqworker default
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Reconciliation sweep on a fixed interval. A plain sleep loop is enough
+  # for the MVP — it's a one-line thing to explain in an interview, and
+  # swapping it for real cron or a system timer later is a config change,
+  # not an architecture change.
+  reconciler:
+    build: .
+    entrypoint: ["/entrypoint.sh"]
+    command: >
+      sh -c "while true; do
+        python manage.py run_reconciliation;
+        sleep ${RECONCILE_INTERVAL_SECONDS:-300};
+      done"
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
